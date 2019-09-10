@@ -123,7 +123,7 @@ protocol Reader {
     func readData(ofLength: Int) throws -> Data
 }
 
-@available(iOS 9.0, *)
+@available(iOS 9.0, macOS 10.11, *)
 open class Zip {
     
     private struct Entry: ZipEntry {
@@ -565,7 +565,7 @@ open class Zip {
     
 }
 
-@available(iOS 9.0, *)
+@available(iOS 9.0, macOS 10.11, *)
 extension Zip: Reader {
     
     internal func readString(ofLength n: Int) throws -> String {
@@ -601,7 +601,7 @@ extension Zip: Reader {
 
 }
 
-@available(iOS 9.0, *)
+@available(iOS 9.0, macOS 10.11, *)
 public func unzip(_ source: URL, to destination: URL) throws {
     try Zip(url: source).extract(to: destination)
 }

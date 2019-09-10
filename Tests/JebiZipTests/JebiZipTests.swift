@@ -20,16 +20,20 @@
 //  THE SOFTWARE.
 //
 
+#if !os(watchOS)
 import XCTest
 @testable import JebiZip
 
-@available(iOS 9.0, *)
+@available(iOS 9.0, macOS 10.11, *)
 final class JebiZipTests: XCTestCase {
-    func testExample() throws {
-        Zip(url: URL(fileURLWithPath: "/"))
+    func testUnzip() throws {
+        let url = URL(fileURLWithPath: "/tmp/JebiZip-1.0.0.zip")
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+        try unzip(url, to: directory)
     }
 
     static var allTests = [
-        ("testExample", testExample),
+        ("testUnzip", testUnzip),
     ]
 }
+#endif

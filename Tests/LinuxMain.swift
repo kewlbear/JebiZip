@@ -20,6 +20,7 @@
 //  THE SOFTWARE.
 //
 
+#if !os(watchOS)
 import XCTest
 
 import JebiZipTests
@@ -27,3 +28,4 @@ import JebiZipTests
 var tests = [XCTestCaseEntry]()
 tests += JebiZipTests.allTests()
 XCTMain(tests)
+#endif

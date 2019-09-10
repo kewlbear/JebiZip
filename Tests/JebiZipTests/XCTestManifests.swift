@@ -20,6 +20,7 @@
 //  THE SOFTWARE.
 //
 
+#if !os(watchOS)
 import XCTest
 
 #if !canImport(ObjectiveC)
@@ -28,4 +29,5 @@ public func allTests() -> [XCTestCaseEntry] {
         testCase(JebiZipTests.allTests),
     ]
 }
+#endif
 #endif

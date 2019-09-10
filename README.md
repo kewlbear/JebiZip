@@ -12,8 +12,9 @@ try unzip(zipURL, to: directoryURL)
 
 ## Requirements
 
-Swift 5.1 or above
-iOS 9 or above
+- iOS 9+ / macOS 10.11+
+- Xcode 11+
+- Swift 5.1+
 
 ## Installation
 
