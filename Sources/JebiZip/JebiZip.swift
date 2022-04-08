@@ -24,6 +24,103 @@
 
 import Foundation
 import zlib
+#if canImport(Compression)
+import Compression
+
+extension compression_stream {
+    init() {
+        self = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1).pointee
+    }
+}
+
+@available(macOS 10.11, *)
+class Compression: Decompressor {
+    lazy var destinationBufferPointer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+    
+    lazy var scratchBufferPointer = UnsafeMutablePointer<UInt8>.allocate(capacity: compression_decode_scratch_buffer_size(COMPRESSION_ZLIB))
+    
+    deinit {
+        scratchBufferPointer.deallocate()
+        destinationBufferPointer.deallocate()
+    }
+
+    func decompress(input: (Int) -> Data, compressedSize: Int, decompressedSize: Int, output: (Result<Data, Error>) throws -> Void) throws {
+        guard decompressedSize > bufferSize || compressedSize > 1024 * 1024 else {
+            let data = input(compressedSize)
+            try output(.success(data.withUnsafeBytes {
+                let baseAddress = $0.bindMemory(to: UInt8.self).baseAddress!
+                let count = compression_decode_buffer(destinationBufferPointer, bufferSize, baseAddress, data.count, scratchBufferPointer, COMPRESSION_ZLIB)
+                return Data(bytesNoCopy: destinationBufferPointer,
+                                      count: count,
+                                      deallocator: .none)
+            }))
+            return
+        }
+        
+        var stream = compression_stream()
+        var status = compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
+        guard status != COMPRESSION_STATUS_ERROR else {
+            fatalError("Unable to initialize the compression stream.")
+        }
+        defer {
+            compression_stream_destroy(&stream)
+        }
+        
+        stream.src_size = 0
+        stream.dst_ptr = destinationBufferPointer
+        stream.dst_size = bufferSize
+        
+        var sourceData: Data?
+        repeat {
+            var flags = Int32(0)
+            
+            // If this iteration has consumed all of the source data,
+            // read a new tempData buffer from the input file.
+            if stream.src_size == 0 {
+                sourceData = input(bufferSize)
+                
+                stream.src_size = sourceData!.count
+                if sourceData!.count < bufferSize {
+                    flags = Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
+                }
+            }
+        
+            if let sourceData = sourceData {
+                let count = sourceData.count
+                
+                sourceData.withUnsafeBytes {
+                    let baseAddress = $0.bindMemory(to: UInt8.self).baseAddress!
+                    
+                    stream.src_ptr = baseAddress.advanced(by: count - stream.src_size)
+                    status = compression_stream_process(&stream, flags)
+                }
+            }
+            
+            switch status {
+            case COMPRESSION_STATUS_OK,
+                 COMPRESSION_STATUS_END:
+                
+                // Get the number of bytes put in the destination buffer. This is the difference between
+                // stream.dst_size before the call (here bufferSize), and stream.dst_size after the call.
+                let count = bufferSize - stream.dst_size
+                
+                let outputData = Data(bytesNoCopy: destinationBufferPointer,
+                                      count: count,
+                                      deallocator: .none)
+                
+                // Write all produced bytes to the output file.
+                try output(.success(outputData))
+                
+                // Reset the stream to receive the next batch of output.
+                stream.dst_ptr = destinationBufferPointer
+                stream.dst_size = bufferSize
+            default:
+                fatalError() // FIXME: ...
+            }
+        } while status == COMPRESSION_STATUS_OK
+    }
+}
+#endif
 
 private let ErrorDomain = "JebiZipErrorDomain"
 
@@ -123,13 +220,81 @@ protocol Reader {
     func readData(ofLength: Int) throws -> Data
 }
 
+var chunk = 128 * 1024
+
+let bufferSize = 8 * 1024 * 1024
+
+protocol Decompressor {
+    func decompress(input: (Int) -> Data, compressedSize: Int, decompressedSize: Int, output: (Result<Data, Error>) throws -> Void) throws
+}
+
+class Zlib: Decompressor {
+    lazy var out = Array(repeating: UInt8(0), count: chunk)
+
+    func decompress(input: (Int) -> Data, compressedSize: Int, decompressedSize: Int, output: (Result<Data, Error>) throws -> Void) throws {
+        var remain = Int(compressedSize)
+        var stream = z_stream()
+        stream.zalloc = nil
+        stream.zfree = nil
+        stream.opaque = nil
+        stream.avail_in = 0
+        stream.next_in = nil
+        guard inflateInit2_(&stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+            throw JebiZipError.zlib
+        }
+        
+        defer {
+            inflateEnd(&stream)
+        }
+        var ret = Int32(0)
+        
+        repeat {
+            try autoreleasepool {
+                var data = input(min(chunk, remain))
+//                        print("read", data)//.map { String($0, radix: 16, uppercase: false) })
+                remain -= data.count
+                stream.avail_in = uInt(data.count)
+                try data.withUnsafeMutableBytes {
+                    stream.next_in = $0.bindMemory(to: UInt8.self).baseAddress
+                    
+                    repeat {
+                        try out.withUnsafeMutableBytes {
+                            stream.avail_out = uInt(chunk)
+                            stream.next_out = $0.bindMemory(to: UInt8.self).baseAddress
+                            ret = zlib.inflate(&stream, Z_NO_FLUSH)
+                            switch ret {
+                            case Z_NEED_DICT:
+                                throw JebiZipError.zlib
+                            case Z_DATA_ERROR:
+                                throw JebiZipError.zlib
+                            case Z_MEM_ERROR:
+                                throw JebiZipError.zlib
+                            default:
+//                                        print("inflate() =", ret)
+                                break
+                            }
+                            
+                            // TODO: write
+//                                    print("write", chunk - Int(stream.avail_out))
+                            try $0.baseAddress.map {
+                                let data = Data(bytesNoCopy: $0, count: chunk - Int(stream.avail_out), deallocator: .none)
+                                try output(.success(data))
+                            }
+                        }
+                    } while stream.avail_out == 0
+                }
+            }
+        } while ret != Z_STREAM_END &&
+            remain > 0
+        
+        assert(remain == 0)
+    }
+}
+
 @available(iOS 9.0, macOS 10.11, *)
 open class Zip {
     
     private struct Entry: ZipEntry {
-        
-        var chunk = 256 * 1024
-
         let versionNeededToExtract: UInt16
         let flags: UInt16
         let compressionMethod: CompressionMethod
@@ -147,8 +312,11 @@ open class Zip {
         
         private let offset: UInt64
         
-        init(reader: Reader) throws {
+        let decompressor: Decompressor
+        
+        init(reader: Reader, decompressor: Decompressor) throws {
             self.reader = reader
+            self.decompressor = decompressor
         
             versionNeededToExtract = try reader.readUInt16()
             flags = try reader.readUInt16()
@@ -178,7 +346,7 @@ open class Zip {
                 
                 let writer = try FileHandle(forWritingTo: url)
                 
-                try enumerateChunks {
+                try enumerateChunks(decompressor: decompressor) {
                     let data = try $0.get()
                     writer.write(data)
                 }
@@ -193,12 +361,12 @@ open class Zip {
             }
         }
         
-        func enumerateChunks(using handler: (Result<Data, Error>) throws -> Void) throws {
+        func enumerateChunks(decompressor: Decompressor, using handler: (Result<Data, Error>) throws -> Void) throws {
             switch compressionMethod {
             case .store:
                 try read(using: handler)
             case .deflate:
-                try inflate(using: handler)
+                try inflate(decompressor: decompressor, using: handler)
             default:
                 throw JebiZipError.unsupportedCompressionMethod
             }
@@ -217,66 +385,12 @@ open class Zip {
             }
         }
         
-        func inflate(using handler: (Result<Data, Error>) throws -> Void) throws {
+        func inflate(decompressor: Decompressor, using handler: (Result<Data, Error>) throws -> Void) throws {
 //            print("compressed:", compressedSize, "uncompressed:", uncompressedSize)
             try reader.zipFile.map { fileHandle in
-                var remain = Int(compressedSize)
-                var out = Array(repeating: UInt8(0), count: chunk)
-                var stream = z_stream()
-                stream.zalloc = nil
-                stream.zfree = nil
-                stream.opaque = nil
-                stream.avail_in = 0
-                stream.next_in = nil
-                guard inflateInit2_(&stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
-                    throw JebiZipError.zlib
-                }
-                
-                defer {
-                    inflateEnd(&stream)
-                }
-                var ret = Int32(0)
-                
-                repeat {
-                    try autoreleasepool {
-                        var data = fileHandle.readData(ofLength: min(chunk, remain))
-//                        print("read", data)//.map { String($0, radix: 16, uppercase: false) })
-                        remain -= data.count
-                        stream.avail_in = uInt(data.count)
-                        try data.withUnsafeMutableBytes {
-                            stream.next_in = $0.bindMemory(to: UInt8.self).baseAddress
-                            
-                            repeat {
-                                try out.withUnsafeMutableBytes {
-                                    stream.avail_out = uInt(chunk)
-                                    stream.next_out = $0.bindMemory(to: UInt8.self).baseAddress
-                                    ret = zlib.inflate(&stream, Z_NO_FLUSH)
-                                    switch ret {
-                                    case Z_NEED_DICT:
-                                        throw JebiZipError.zlib
-                                    case Z_DATA_ERROR:
-                                        throw JebiZipError.zlib
-                                    case Z_MEM_ERROR:
-                                        throw JebiZipError.zlib
-                                    default:
-//                                        print("inflate() =", ret)
-                                        break
-                                    }
-                                    
-                                    // TODO: write
-//                                    print("write", chunk - Int(stream.avail_out))
-                                    try $0.baseAddress.map {
-                                        let data = Data(bytesNoCopy: $0, count: chunk - Int(stream.avail_out), deallocator: .none)
-                                        try handler(.success(data))
-                                    }
-                                }
-                            } while stream.avail_out == 0
-                        }
-                    }
-                } while ret != Z_STREAM_END &&
-                    remain > 0
-                
-                assert(remain == 0)
+                try decompressor.decompress(input: { count in
+                    fileHandle.readData(ofLength: count)
+                }, compressedSize: Int(compressedSize), decompressedSize: Int(uncompressedSize), output: handler)
             }
         }
         
@@ -308,8 +422,11 @@ open class Zip {
         
         let reader: Reader
         
-        init(reader: Reader) throws {
+        let decompressor: Decompressor
+        
+        init(reader: Reader, decompressor: Decompressor) throws {
             self.reader = reader
+            self.decompressor = decompressor
             
             versionMadeBy = try reader.readUInt16()
             versionNeededToExtract = try reader.readUInt16()
@@ -347,7 +464,7 @@ open class Zip {
                 throw JebiZipError.corruptFile
             }
 
-            var entry = try Entry(reader: reader)
+            var entry = try Entry(reader: reader, decompressor: decompressor)
             
             entry.compressedSize = compressedSize // TODO: better way?
             
@@ -442,10 +559,16 @@ open class Zip {
     
     internal var zipFile: FileHandle?
     
-    private var handler: ((Result<ZipEntry, Error>) throws -> Void)?
+    private var enumerator: ((Result<ZipEntry, Error>) throws -> Void)?
+    
+    var decompressor: Decompressor
     
     public init(url: URL) {
         self.url = url
+        decompressor = Zlib()
+#if canImport(Compression)
+        decompressor = Compression()
+#endif
     }
     
     open func extract(to url: URL) throws {
@@ -473,7 +596,7 @@ open class Zip {
     }
 
     open func enumerateEntries(using handler: @escaping (Result<ZipEntry, Error>) throws -> Void) rethrows {
-        self.handler = handler
+        self.enumerator = handler
         do {
             try read()
         }
@@ -509,8 +632,8 @@ open class Zip {
 //                print("unexpected signature:", String(signature, radix: 16, uppercase: false))
                 break
             }
-            try handler?(Result {
-                try CentralDirectoryHeader(reader: self)
+            try enumerator?(Result {
+                try CentralDirectoryHeader(reader: self, decompressor: decompressor)
             })
         }
     }
@@ -558,8 +681,8 @@ open class Zip {
     }
     
     private func readLocalFileHeader() throws {
-        try handler?(Result {
-            try Entry(reader: self)
+        try enumerator?(Result {
+            try Entry(reader: self, decompressor: decompressor)
         })
     }
     
