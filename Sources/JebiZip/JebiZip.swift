@@ -559,7 +559,9 @@ open class Zip {
     
     internal var zipFile: FileHandle?
     
-    private var enumerator: ((Result<ZipEntry, Error>) throws -> Void)?
+    public typealias Enumerator = (Result<(ZipEntry, UInt64, UInt64), Error>) throws -> Void
+    
+    private var enumerator: Enumerator?
     
     var decompressor: Decompressor
     
@@ -571,10 +573,11 @@ open class Zip {
 #endif
     }
     
-    open func extract(to url: URL) throws {
-        // TODO: ...
+    open func extract(to url: URL, progress: ((Float) -> Void)? = nil) throws {
+        progress?(0)
         try enumerateEntries {
-            let entry = try $0.get()
+            let result = try $0.get()
+            let entry = result.0
             let isDirectory = entry.filename.hasSuffix("/") // TODO: external attributes?
             let entryUrl = URL(fileURLWithPath: entry.filename, isDirectory: isDirectory, relativeTo: url)
             if isDirectory {
@@ -592,10 +595,11 @@ open class Zip {
             } else {
                 try entry.write(to: entryUrl)
             }
+            progress?(Float(result.1) / Float(result.2))
         }
     }
 
-    open func enumerateEntries(using handler: @escaping (Result<ZipEntry, Error>) throws -> Void) rethrows {
+    open func enumerateEntries(using handler: @escaping Enumerator) rethrows {
         self.enumerator = handler
         do {
             try read()
@@ -611,6 +615,8 @@ open class Zip {
         let endOfCentralDirectory = try findEndOfCentralDirectory()
         
         assert(endOfCentralDirectory.numberOfThisDisk == endOfCentralDirectory.numberOfDiskWithStartOfCentralDirectory)
+        let entryCount: UInt64
+        var readEntryCount = UInt64(0)
         if endOfCentralDirectory.isZip64 {
             let locator = try findZip64EndOfCentralDirectoryLocator(endOfCentralDirectory: endOfCentralDirectory)
             assert(locator.diskCount == 1)
@@ -620,9 +626,11 @@ open class Zip {
             }
             let endOfCentralDirectory = try Zip64EndOfCentralDirectory(reader: self)
 //            print("central directory:", endOfCentralDirectory.totalEntryCount, "entries", endOfCentralDirectory.centralDirectorySize, "bytes @", endOfCentralDirectory.offset)
+            entryCount = endOfCentralDirectory.totalEntryCount
             zipFile?.seek(toFileOffset: UInt64(endOfCentralDirectory.offset))
         } else {
 //            print("central directory:", endOfCentralDirectory.totalNumberOfEntriesInCentralDirectory, "entries", endOfCentralDirectory.centralDirectorySize, "bytes @", endOfCentralDirectory.centralDirectoryStartOffset)
+            entryCount = UInt64(endOfCentralDirectory.totalNumberOfEntriesInCentralDirectory)
             zipFile?.seek(toFileOffset: UInt64(endOfCentralDirectory.centralDirectoryStartOffset))
         }
         
@@ -633,7 +641,9 @@ open class Zip {
                 break
             }
             try enumerator?(Result {
-                try CentralDirectoryHeader(reader: self, decompressor: decompressor)
+                let header = try CentralDirectoryHeader(reader: self, decompressor: decompressor)
+                readEntryCount += 1
+                return (header, readEntryCount, entryCount)
             })
         }
     }
@@ -680,12 +690,6 @@ open class Zip {
         return try Zip64EndOfCentralDirectoryLocator(reader: self)
     }
     
-    private func readLocalFileHeader() throws {
-        try enumerator?(Result {
-            try Entry(reader: self, decompressor: decompressor)
-        })
-    }
-    
 }
 
 @available(iOS 9.0, macOS 10.11, *)
@@ -725,6 +729,6 @@ extension Zip: Reader {
 }
 
 @available(iOS 9.0, macOS 10.11, *)
-public func unzip(_ source: URL, to destination: URL) throws {
-    try Zip(url: source).extract(to: destination)
+public func unzip(_ source: URL, to destination: URL, progress: ((Float) -> Void)? = nil) throws {
+    try Zip(url: source).extract(to: destination, progress: progress)
 }
