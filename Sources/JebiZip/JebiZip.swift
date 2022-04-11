@@ -573,8 +573,9 @@ open class Zip {
 #endif
     }
     
-    open func extract(to url: URL, progress: ((Float) -> Void)? = nil) throws {
-        progress?(0)
+    open func extract(to url: URL, progress: ((Float) throws -> Void)? = nil) throws {
+        try progress?(0)
+        
         try enumerateEntries {
             let result = try $0.get()
             let entry = result.0
@@ -595,7 +596,7 @@ open class Zip {
             } else {
                 try entry.write(to: entryUrl)
             }
-            progress?(Float(result.1) / Float(result.2))
+            try progress?(Float(result.1) / Float(result.2))
         }
     }
 
@@ -729,6 +730,6 @@ extension Zip: Reader {
 }
 
 @available(iOS 9.0, macOS 10.11, *)
-public func unzip(_ source: URL, to destination: URL, progress: ((Float) -> Void)? = nil) throws {
+public func unzip(_ source: URL, to destination: URL, progress: ((Float) throws -> Void)? = nil) throws {
     try Zip(url: source).extract(to: destination, progress: progress)
 }
